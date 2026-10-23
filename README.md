@@ -34,3 +34,5 @@ python/
 ```
 
 [Đối chiếu với bản gốc](docs/ORIGINAL-FEATURE-AUDIT.md). Bản C# FlowDesk cũ vẫn nằm trong `src/` và `tests/` để tham khảo; [tài liệu bản WPF cũ](docs/FLOWDESK-WPF.md). File **FlowDesk.Desktop.exe** là bản demo cũ, không phải ứng dụng Python đã khôi phục.
+
+[Kết quả kiểm thử và ảnh chạy thực tế trên Windows](docs/PYTHON-VALIDATION.md): 31 tests Python đạt; bản EXE đã được mở/kiểm tra trên máy Windows trước khi xuất bản.
