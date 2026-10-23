@@ -13,7 +13,7 @@ output.parent.mkdir(parents=True, exist_ok=True)
 with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
     for item in sorted((root / 'python').rglob('*')):
         relative = item.relative_to(root / 'python')
-        if any(part in {'__pycache__', '.pytest_cache', 'dist', 'build', 'webprofile'} for part in relative.parts):
+        if any(part in {'__pycache__', '.pytest_cache', '.venv', 'venv', '.git', 'dist', 'build', 'webprofile'} for part in relative.parts):
             continue
         if item.is_file() and item.suffix in {'.py', '.txt', '.md', '.bat', '.ps1'}:
             archive.write(item, Path('AI-MT-Trading-Python') / relative)
