@@ -1,6 +1,13 @@
 name: Build and validate
 on:
   push:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'global.json'
+      - 'Directory.Build.props'
+      - 'FlowDesk.sln'
+      - '.github/workflows/build.yml'
   pull_request:
   workflow_dispatch:
 permissions:

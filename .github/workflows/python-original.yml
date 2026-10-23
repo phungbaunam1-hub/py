@@ -1,0 +1,68 @@
+name: Python original + Order Flow
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'python/**'
+      - 'scripts/package-python-source.py'
+      - '.github/workflows/python-original.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: python-original-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows-python:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: 'python/requirements*.txt'
+      - name: Install Python dependencies
+        run: python -m pip install -r python/requirements-dev.txt -r python/requirements-web.txt
+      - name: Test original UI, preserved analysis and order flow
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest python/tests -q --junitxml=artifacts/python-tests.xml
+      - name: Package the original application with its addon
+        run: ./python/Build-Windows.ps1
+      - name: Launch the real packaged Windows EXE and verify its UI
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $env:AIMT_CONFIG = Join-Path $env:RUNNER_TEMP 'aimt-smoke-config.json'
+          $env:AIMT_SMOKE_REPORT = Join-Path $env:GITHUB_WORKSPACE 'artifacts/packaged-smoke.json'
+          $process = Start-Process -FilePath 'python/dist/AI_MT_Trading/AI_MT_Trading.exe' -ArgumentList '--smoke-test' -PassThru
+          if (-not $process.WaitForExit(45000)) {
+            Stop-Process -Id $process.Id -Force
+            throw 'Packaged application timed out.'
+          }
+          if ($process.ExitCode -ne 0) { throw "Packaged application failed: $($process.ExitCode)" }
+          $report = Get-Content artifacts/packaged-smoke.json -Raw | ConvertFrom-Json
+          if (-not $report.ok) { throw 'Packaged GUI checks failed.' }
+          Get-Content artifacts/packaged-smoke.json
+      - name: Publish downloadable Windows and source packages
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = 'python-original-' + $env:GITHUB_RUN_NUMBER
+          gh release create $tag --target $env:GITHUB_SHA --title "AI MT Trading gốc + Order Flow ($tag)" --notes-file python/RELEASE.md --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release creation failed.' }
+          gh release upload $tag artifacts/AI-MT-Trading-Python-Windows-x64.zip artifacts/AI-MT-Trading-Python-source.zip artifacts/AI-MT-Trading-Python-source.sha256.txt artifacts/packaged-smoke.json artifacts/packaged-smoke.png --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: AI-MT-Trading-Python-validation
+          path: |
+            artifacts/python-tests.xml
+            artifacts/packaged-smoke.*

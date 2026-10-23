@@ -10,3 +10,12 @@ sdk/*.xml
 sdk/*.pdb
 sdk/*.zip
 global.local.json
+__pycache__/
+.pytest_cache/
+*.pyc
+python/build/
+python/dist/
+python/**/*.spec
+ai_mt_trading_config.json
+python/**/ai_mt_trading_config.json
+python/**/webprofile/

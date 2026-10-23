@@ -1,0 +1,2 @@
+-r requirements.txt
+PyQt6-WebEngine==6.10.0
