@@ -19,6 +19,7 @@ class BrokerFeed(threading.Thread):
         self._stop_event = threading.Event()
         self._delivered = threading.Event()
         self._delivered.set()
+        self._rpc_worker = None
 
     def stop(self):
         self._stop_event.set()
@@ -36,6 +37,7 @@ class BrokerFeed(threading.Thread):
                     continue
                 if self.broker.acquire(self.account, 0.05):
                     try:
+                        self._rpc_worker = getattr(getattr(self.broker, 'tl', None), 'w', None)
                         if first:
                             self.symbol = self.broker.resolve(self.symbol)
                         frame = self.broker.orderflow_read(self.symbol, reset=first, timeout=5)
@@ -52,7 +54,15 @@ class BrokerFeed(threading.Thread):
         finally:
             if not first:
                 try:
-                    if self.broker.acquire(self.account, 0.1):
+                    if self._rpc_worker is not None:
+                        worker = self._rpc_worker
+                        if worker.lock.acquire(timeout=.1):
+                            try:
+                                if worker.alive():
+                                    worker.call('orderflow_release', timeout=2)
+                            finally:
+                                worker.lock.release()
+                    elif self.broker.acquire(self.account, 0.1):
                         try:
                             self.broker.orderflow_release()
                         finally:

@@ -116,3 +116,32 @@ def test_worker_backpressure_and_stop_join_leave_no_queued_market_stream():
         worker.join(2)
     assert not worker.is_alive() and broker.released
     assert len(frames) == 2 and all(generation == 7 for generation, _ in frames)
+
+
+def test_stop_uses_existing_rpc_worker_without_logging_back_into_old_account():
+    from aimt_orderflow.feeds import BrokerFeed
+    ready = threading.Event()
+    calls = []
+
+    class Emit:
+        def __init__(self, fn): self.emit = fn
+
+    rpc = SimpleNamespace(lock=threading.RLock(), alive=lambda: True,
+                          call=lambda op, **_: calls.append(op))
+
+    class Broker:
+        def __init__(self): self.tl, self.logins = threading.local(), 0
+        def acquire(self, *_): self.logins += 1; self.tl.w = rpc; return True
+        def release(self, *_): self.tl.w = None
+        def resolve(self, symbol): return symbol
+        def orderflow_read(self, *_, **__): return {'trades': []}
+
+    broker = Broker()
+    signals = SimpleNamespace(frame=Emit(lambda *_: ready.set()), status=Emit(lambda *_: None))
+    worker = BrokerFeed(broker, {'name': 'old account'}, 'TEST', signals, 1)
+    worker.start()
+    assert ready.wait(2)
+    worker.stop()
+    worker.join(2)
+    assert not worker.is_alive()
+    assert broker.logins == 1 and calls == ['orderflow_release']

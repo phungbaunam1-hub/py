@@ -148,6 +148,7 @@ class OrderFlowDock(QtWidgets.QDockWidget):
         self.engine.reset()
         self.history.clear()
         self.last_snapshot = self.engine.snapshot()
+        self._quote_text, self._last_frame = 'Bid — | Ask —', None
         self.active_symbol = self.app.acc_symbol(self.app.primary()) if self.app.primary() else self.app.cfg['symbol']
         mode = self.source.currentIndex()
         if mode == 2:
