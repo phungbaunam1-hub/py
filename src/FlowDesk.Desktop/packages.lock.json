@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net8.0-windows7.0": {
+      "flowdesk.core": {
+        "type": "Project"
+      },
+      "flowdesk.infrastructure": {
+        "type": "Project",
+        "dependencies": {
+          "FlowDesk.Core": "[1.0.0, )"
+        }
+      }
+    },
+    "net8.0-windows7.0/win-x64": {}
+  }
+}

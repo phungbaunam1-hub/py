@@ -1,0 +1,30 @@
+name: Build and validate
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - run: dotnet restore FlowDesk.sln --locked-mode
+      - run: dotnet build FlowDesk.sln -c Release --no-restore
+      - name: Publish standalone Windows x64 demo
+        run: ./scripts/Publish-Windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FlowDesk-Windows-x64-demo
+          path: artifacts/windows-x64/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Test-results
+          path: '**/TestResults/*.trx'

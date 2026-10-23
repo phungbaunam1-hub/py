@@ -1,0 +1,12 @@
+**/bin/
+**/obj/
+.vs/
+.idea/
+*.user
+artifacts/
+TestResults/
+sdk/*.dll
+sdk/*.xml
+sdk/*.pdb
+sdk/*.zip
+global.local.json

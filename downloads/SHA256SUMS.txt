@@ -1,0 +1,2 @@
+3477670ae6361d8b2b6f70de577d631e3e1320d62f7271413ae91ecbebc07a32  FlowDesk-Windows-x64-demo.zip
+6917b61d4c239b4fe0f0c7b464bdf0acda800c516ef181461cb5bd3647c4798c  FlowDesk-source.zip
