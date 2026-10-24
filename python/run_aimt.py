@@ -19,6 +19,9 @@ def main():
     from PyQt6 import QtWidgets
     from original import AI_MT_Trading as legacy
     from aimt_orderflow.application import create_window
+    if os.environ.get('AIMT_CONFIG'):
+        # Browser sessions belong with persistent configuration, including a one-file launch.
+        legacy.BASE_DIR = str(Path(os.environ['AIMT_CONFIG']).expanduser().resolve().parent)
 
     if args.demo or args.smoke_test:
         load = legacy.load_cfg
@@ -33,6 +36,7 @@ def main():
         legacy.load_cfg = demo_config
     app = QtWidgets.QApplication(sys.argv[:1])
     window = create_window(legacy)
+    window.setWindowTitle('AI MT Trading · Crypto Workspace')
     window.show()
     if args.smoke_test:
         _run_smoke(app, window)
@@ -91,11 +95,14 @@ def _run_smoke(app, window):
             'hotkey_confirmation_default': window.confirm_hotkeys.isChecked(),
             'ai_context_has_workspace': bool(context.get('workspace') or context.get('market_workspace')),
             'public_crypto_providers': ['Binance', 'Bybit', 'OKX', 'Kraken'],
+            'mt5_async_dispatch_ready': getattr(window, '_order_dispatcher', None) is not None,
+            'mt5_async_mode': 'background_queue_per_terminal_fifo_not_MQL_OrderSendAsync',
         }
         report['ok'] = (report['ok'] and report['broker_demo'] and report['analysis_results'] == 8
                         and report['has_panel_chat_web'] and report['orderflow_levels'] > 0
                         and report['research_demo_chart_loaded'] and report['research_chart_blocks_mt5_entries']
-                        and report['hotkey_confirmation_default'] and report['ai_context_has_workspace'])
+                        and report['hotkey_confirmation_default'] and report['ai_context_has_workspace']
+                        and report['mt5_async_dispatch_ready'])
         if sys.platform == 'win32' and getattr(sys, 'frozen', False):
             helper = Path(QtCore.QLibraryInfo.path(QtCore.QLibraryInfo.LibraryPath.LibraryExecutablesPath)) / 'QtWebEngineProcess.exe'
             report['webengine_helper_exists'] = helper.is_file()

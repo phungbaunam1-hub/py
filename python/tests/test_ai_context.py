@@ -65,6 +65,21 @@ class Window:
     def ai_conclusion_changed(self, data): self.conclusions.append(data)
 
 
+def test_every_ai_context_includes_unresolved_execution_tasks_without_claiming_fills():
+    window = Window()
+    tasks = [{'request_id': str(n), 'state': 'completed', 'metadata': {'action': 'BUY'}} for n in range(50)]
+    tasks += [{'request_id': 'pending', 'state': 'queued', 'metadata': {'account_name': 'A'}},
+              {'request_id': 'unknown', 'state': 'unknown', 'error': 'Check MT5'}]
+    window._order_dispatcher = SimpleNamespace(snapshot=lambda: {
+        'queued': 1, 'running': 0, 'paused_keys': ['terminal-A'], 'jobs': tasks})
+    context = build_ai_context(window)['execution_order_queue']
+    assert context['pending_tasks']['items'][0]['request_id'] == 'pending'
+    assert context['recent_tasks']['items'][-1]['state'] == 'unknown'
+    assert context['recent_tasks']['total'] == 51 and context['recent_tasks']['included'] == 40
+    assert context['paused_keys'] == ['terminal-A']
+    assert 'does not imply filled' in context['semantics']
+
+
 def legacy_module(captured, reply=None):
     def provider(cfg, name, system, messages, png=None, json_mode=False, log=None):
         context = decoded_context(messages)

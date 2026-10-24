@@ -5,6 +5,7 @@ on:
     paths:
       - 'python/**'
       - 'scripts/package-python-source.py'
+      - 'scripts/package-python-single.py'
       - '.github/workflows/python-original.yml'
   workflow_dispatch:
 permissions:
@@ -35,6 +36,8 @@ jobs:
         run: python scripts/probe-public-markets.py --output artifacts/public-market-probe.json
       - name: Package the original application with its addon
         run: ./python/Build-Windows.ps1
+      - name: Verify delivery ZIP contains just one executable
+        run: python -c "import zipfile; z=zipfile.ZipFile('artifacts/AI-MT-Trading-Python-Windows-x64.zip'); assert z.namelist()==['AI_MT_Trading.exe'], z.namelist()"
       - name: Launch the real packaged Windows EXE and verify its UI
         shell: pwsh
         env:
@@ -42,8 +45,8 @@ jobs:
         run: |
           $env:AIMT_CONFIG = Join-Path $env:RUNNER_TEMP 'aimt-smoke-config.json'
           $env:AIMT_SMOKE_REPORT = Join-Path $env:GITHUB_WORKSPACE 'artifacts/packaged-smoke.json'
-          $process = Start-Process -FilePath 'python/dist/AI_MT_Trading/AI_MT_Trading.exe' -ArgumentList '--smoke-test' -PassThru
-          if (-not $process.WaitForExit(45000)) {
+          $process = Start-Process -FilePath 'python/dist/AI_MT_Trading.exe' -ArgumentList '--smoke-test' -PassThru
+          if (-not $process.WaitForExit(120000)) {
             Stop-Process -Id $process.Id -Force
             throw 'Packaged application timed out.'
           }
@@ -59,7 +62,7 @@ jobs:
           $tag = 'python-original-' + $env:GITHUB_RUN_NUMBER
           gh release create $tag --target $env:GITHUB_SHA --title "AI MT Trading · Crypto Workspace ($tag)" --notes-file python/RELEASE.md --latest
           if ($LASTEXITCODE -ne 0) { throw 'Release creation failed.' }
-          gh release upload $tag artifacts/AI-MT-Trading-Python-Windows-x64.zip artifacts/AI-MT-Trading-Python-source.zip artifacts/AI-MT-Trading-Python-source.sha256.txt artifacts/packaged-smoke.json artifacts/packaged-smoke.png artifacts/public-market-probe.json artifacts/python-tests.xml --clobber
+          gh release upload $tag artifacts/AI_MT_Trading.exe artifacts/AI_MT_Trading.py artifacts/AI-MT-Trading-single-file.sha256.txt artifacts/AI-MT-Trading-Python-Windows-x64.zip artifacts/AI-MT-Trading-Python-source.zip artifacts/AI-MT-Trading-Python-source.sha256.txt artifacts/packaged-smoke.json artifacts/packaged-smoke.png artifacts/public-market-probe.json artifacts/python-tests.xml --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Release upload failed.' }
       - uses: actions/upload-artifact@v4
         if: always()

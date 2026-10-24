@@ -1,6 +1,8 @@
 import copy
 import sys
 import time
+import threading
+from contextlib import contextmanager
 
 import pytest
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -214,3 +216,124 @@ def test_unchanged_primary_selection_preserves_generation_and_stale_primary_neve
     assert 'Định lượng:</b> DỮ LIỆU CŨ' in window.card.text()
     assert 'AI · DỮ LIỆU CŨ' in window.card.text()
     assert 'Định lượng:</b> BUY' not in window.card.text()
+
+
+@contextmanager
+def busy_terminal(window):
+    started, release = threading.Event(), threading.Event()
+
+    def occupy():
+        started.set()
+        assert release.wait(5), 'Test must release the fake terminal operation'
+
+    handle = window._order_dispatcher.submit(window._terminal_key(window.primary()), occupy,
+        metadata={'entry': False, 'action': 'test-blocker'})
+    assert started.wait(1)
+    try:
+        yield handle
+    finally:
+        release.set()
+        handle.result(timeout=2)
+
+
+def test_panel_dispatch_returns_immediately_and_cancels_stale_entries_but_keeps_close(window):
+    with window.broker.session(window.primary()):
+        assert window.broker.order('XAUUSD', 'BUY', .01, 0, 0)[0]
+    with busy_terminal(window):
+        before = time.monotonic()
+        entries = window.panel_run(lambda ops, symbol: ops.market(symbol, 'BUY', .01), order=True)
+        closes = window.panel_run(lambda ops, symbol: ops.close_all(symbol))
+        assert time.monotonic() - before < .2
+        public_page(window)
+        assert entries[0].result(timeout=1).state == 'cancelled'
+    result = closes[0].result(timeout=2)
+    assert result.state == 'completed'
+    with window.broker.session(window.primary()):
+        assert not window.broker.positions('XAUUSD')
+
+
+def test_queued_reverse_checks_captured_scope_before_closing_any_position(window):
+    with window.broker.session(window.primary()):
+        assert window.broker.order('XAUUSD', 'BUY', .01, 0, 0)[0]
+    with busy_terminal(window):
+        handles = window.panel_run(lambda ops, symbol: ops.reverse_all(symbol))
+        public_page(window)
+        window.market_workspace.tabs.setCurrentWidget(window.market_workspace.primary_page)
+    result = handles[0].result(timeout=2)
+    assert result.state == 'completed'
+    assert 'Reverse bị chặn' in result.value['broker_value']
+    with window.broker.session(window.primary()):
+        positions = window.broker.positions('XAUUSD')
+        assert len(positions) == 1 and positions[0]['type'] == 'BUY'
+
+
+def test_unknown_outcome_latches_terminal_until_explicit_resume_without_replaying(window, qt_app):
+    from aimt_orderflow.async_dispatch import IndeterminateExecutionError
+
+    def lose_reply(_ops, _symbol):
+        raise IndeterminateExecutionError('Broker response lost after dispatch')
+
+    handle = window.panel_run(lose_reply, order=True)[0]
+    assert handle.result(timeout=2).state == 'unknown'
+    wait_for(qt_app, lambda: bool(window._uncertain_terminals))
+    key = window._terminal_key(window.primary())
+    assert key in window._order_dispatcher.snapshot()['paused_keys']
+    assert key in legacy.load_cfg()['async_uncertain_terminals']
+    assert not window._entries_allowed(notify=False)
+    public_page(window)
+    window.market_workspace.tabs.setCurrentWidget(window.market_workspace.primary_page)
+    assert key in window._uncertain_terminals
+    manages = window.panel_run(lambda _ops, _symbol: 'reconciliation read')
+    assert manages[0].result(timeout=2).state == 'completed'
+    assert window.panel_run(lambda ops, symbol: ops.market(symbol, 'BUY', .01), order=True) is None
+    window.exec_command('ASYNC RESUME')
+    assert not window._uncertain_terminals and not window._order_dispatcher.snapshot()['paused_keys']
+    assert not legacy.load_cfg()['async_uncertain_terminals']
+    assert window._entries_allowed(notify=False)
+    with window.broker.session(window.primary()):
+        assert not window.broker.positions()
+
+
+def test_queued_scope_includes_account_risk_and_effective_default_terminal(window, monkeypatch):
+    account = window.primary()
+    guard = window._order_guard(window._scope_snapshot(), dict(account), entry=True)
+    account['max_lot'] = float(account.get('max_lot') or 1) / 2
+    assert not guard()[0]
+    monkeypatch.setattr(window.broker, 'key_for', lambda acc: acc.get('path') or window.cfg['mt5_path'], raising=False)
+    management = window._order_guard(window._scope_snapshot(), dict(account), entry=False)
+    window.cfg['mt5_path'] = 'another-terminal.exe'
+    assert not management()[0]
+    assert window._task_label('same-dispatcher:1') != window._task_label('same-dispatcher:2')
+
+
+def test_completed_dispatch_has_separate_native_demo_receipt(window):
+    handle = window.panel_run(lambda ops, symbol: ops.market(symbol, 'BUY', .01), order=True)[0]
+    result = handle.result(timeout=2)
+    assert result.state == 'completed'
+    receipt = result.value['last_native_receipt']
+    assert receipt['mode'] == 'demo' and receipt['retcode'] is None
+    assert receipt['state'] == 'filled' and receipt['order'] is not None
+    assert result.value['native_receipt_count'] == 1
+
+
+def test_unknown_latch_restores_on_restart_and_intrinsic_pause_guards_reverse_before_callback(window, qt_app):
+    key = window._terminal_key(window.primary())
+    guard = window._order_guard(window._scope_snapshot(), dict(window.primary()), entry=True)
+    window._order_dispatcher.pause_entries(key)
+    assert not guard()[0] and not window._uncertain_terminals
+    window._order_dispatcher.resume_entries()
+    window._latch_uncertain_terminal(key, 'test unknown outcome')
+    wait_for(qt_app, lambda: key in legacy.load_cfg().get('async_uncertain_terminals', {}))
+    old_hook = sys.excepthook
+    restarted = create_window(legacy)
+    try:
+        wait_for(qt_app, lambda: restarted.last_live is not None)
+        assert key in restarted._uncertain_terminals
+        assert restarted._order_dispatcher.entries_paused(key)
+        assert not restarted._entries_allowed(notify=False)
+    finally:
+        restarted.close()
+        restarted.feed.join(timeout=2)
+        restarted.copy.join(timeout=2)
+        qt_app.processEvents()
+        sys.excepthook = old_hook

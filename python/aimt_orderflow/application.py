@@ -13,6 +13,8 @@ def create_window(legacy, *, client_factory=None, stream_factory=None):
     install_chart_overlay(legacy)
 
     class EnhancedMain(ExecutionScopeMixin, legacy.Main):
+        order_dispatch_changed = QtCore.pyqtSignal(object)
+
         def __init__(self):
             self._init_execution_scope(legacy)
             super().__init__()
@@ -33,6 +35,13 @@ def create_window(legacy, *, client_factory=None, stream_factory=None):
             self.research_button.setToolTip('So sánh phương pháp trên nến đã đóng, phí và walk-forward ngoài mẫu.')
             self.research_button.clicked.connect(lambda: self.market_workspace.open_research())
             self.centralWidget().layout().itemAt(2).layout().addWidget(self.research_button)
+            self.order_dispatch_status = QtWidgets.QLabel('MT5 · hàng đợi sẵn sàng')
+            self.order_dispatch_status.setToolTip('Hàng đợi Python có giới hạn; completed chỉ là tác vụ đã trả kết quả. '
+                'Khớp toàn bộ/một phần/đã nhận lệnh theo xác nhận native MT5 trong Nhật ký. '
+                'Đây không phải CTrade.SetAsyncMode của MQL5; kết quả unknown không tự gửi lại. '
+                'Khóa unknown được lưu qua lần khởi động; kiểm tra MT5 rồi gõ ASYNC RESUME để mở lại.')
+            self.centralWidget().layout().itemAt(2).layout().addWidget(self.order_dispatch_status)
+            self._init_order_dispatcher()
             self._scope_ready = True
             self._selection_changed()
             for control in (self.cb_acc, self.cb_sym, self.cb_tf):
@@ -65,6 +74,8 @@ def create_window(legacy, *, client_factory=None, stream_factory=None):
         def closeEvent(self, event):
             with self._scope_lock:
                 self._execution_state.update(closed=True, primary_active=False)
+            self._preserve_outstanding_native_entries()
+            self._order_dispatcher.shutdown(wait=False, cancel_pending=True)
             self._remove_ai_hooks()
             self.market_workspace.shutdown()
             self.orderflow.shutdown()

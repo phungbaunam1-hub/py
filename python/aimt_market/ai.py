@@ -307,6 +307,20 @@ def build_ai_context(window, *, payload=None, subject=None):
             'snapshot_timestamp_ms': snap.get('timestamp_ms', snap.get('fetched_at_ms'))})
     context['account_coverage'] = {'total_enabled': len(enabled), 'included': len(context['accounts']),
                                    'omitted': max(0, len(enabled) - len(context['accounts'])), 'limit': None}
+    dispatcher = getattr(window, '_order_dispatcher', None)
+    if dispatcher is not None:
+        try:
+            queue = dispatcher.snapshot()
+            jobs = queue.pop('jobs', [])
+            pending = [job for job in jobs if job.get('state') in ('queued', 'running')]
+            resolved = [job for job in jobs if job.get('state') not in ('queued', 'running')]
+            context['execution_order_queue'] = dict(queue,
+                pending_tasks=_rows(pending, len(pending)), recent_tasks=_rows(resolved, 40, latest=True),
+                semantics='Application tasks are not broker orders; completed does not imply filled. '
+                          'Do not assume queued/running/unknown entries are absent or safe to duplicate.')
+        except (AttributeError, RuntimeError, ValueError):
+            context['execution_order_queue'] = {'unavailable': True,
+                'semantics': 'Execution queue state is unknown; do not assume there are no in-flight orders.'}
     news = []
     for item in list(getattr(window, 'news', ()) or ()):
         if isinstance(item, dict):

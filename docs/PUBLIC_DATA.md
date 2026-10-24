@@ -74,6 +74,8 @@ Các host REST cần truy cập: `api.binance.com`, `fapi.binance.com`, `api.byb
 
 ## Tài liệu đã đọc và giới hạn tìm kiếm
 
+Probe Windows của [CI #3](https://github.com/phungbaunam1-hub/py/actions/runs/40051035750), lúc **2026-10-24 01:43 UTC**, đã nhận snapshot thật ở **3/7 thị trường**: OKX spot (1.195 cặp trong catalog), OKX swap (522), Kraken spot (1.344). Mỗi snapshot có 60 nến và không báo lỗi các phần quote/trades/depth/derivatives được yêu cầu. Binance và Bybit bị hạn chế truy cập trên mạng runner; cooldown cục bộ được áp dụng sau lỗi truy cập. Số lượng cặp và khả năng truy cập thay đổi theo thời gian/vùng; đây không phải kiểm thử giao dịch tài khoản thật hoặc kiểm chứng WebSocket live. Báo cáo JSON đầy đủ được đính kèm release.
+
 Nguồn GitHub chính thức đọc được:
 
 - [Binance Spot REST](https://github.com/binance/binance-spot-api-docs/blob/master/rest-api.md), [WebSocket](https://github.com/binance/binance-spot-api-docs/blob/master/web-socket-streams.md).

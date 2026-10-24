@@ -5,7 +5,10 @@ Research charts cannot route broker entries; closing and managing existing order
 remain independent of the selected research chart.
 """
 import copy
+from contextlib import contextmanager, nullcontext
+import hashlib
 import html
+import json
 import math
 import threading
 import time
@@ -74,6 +77,240 @@ class ExecutionScopeMixin:
         self._market_last_live_ms = 0
         self._resolved_aliases = {}
         self._market_active_chart = 'mt5-execution'
+        self._order_dispatcher = None
+        self._dispatch_local = threading.local()
+        self._dispatch_handles = {}
+        self._dispatch_terminal_ids = set()
+        self._uncertain_terminals = {}
+        self._active_native_entries = {}
+
+    def _init_order_dispatcher(self):
+        from aimt_orderflow.async_dispatch import AsyncOrderDispatcher
+        reference = weakref.ref(self)
+
+        def finished(result):
+            owner = reference()
+            if owner is not None and not owner._scope_snapshot().get('closed'):
+                if result.state == 'unknown':
+                    owner._latch_uncertain_terminal(result.terminal_key, result.error)
+                owner.order_dispatch_changed.emit(result)
+
+        self._order_dispatcher = AsyncOrderDispatcher(max_workers=4, max_pending=128,
+            max_per_key=32, history_limit=1024, on_result=finished)
+        saved = self.cfg.get('async_uncertain_terminals') or {}
+        if isinstance(saved, dict):
+            with self._scope_lock:
+                self._uncertain_terminals = {key: {'at_ms': int(value.get('at_ms') or 0)
+                    if isinstance(value.get('at_ms'), (int, float)) and math.isfinite(value['at_ms']) else 0,
+                    'reason': 'native_outcome_unknown_manual_reconciliation_required'}
+                    for key, value in list(saved.items()) if isinstance(key, str) and isinstance(value, dict)}
+            for key in self._uncertain_terminals:
+                self._order_dispatcher.pause_entries(key)
+        from PyQt6 import QtCore
+        self.order_dispatch_changed.connect(self._on_order_dispatch_changed, QtCore.Qt.ConnectionType.QueuedConnection)
+
+    def _on_order_dispatch_changed(self, event):
+        if self._scope_snapshot().get('closed'):
+            return
+        if isinstance(event, dict):
+            if event.get('kind') == 'latch':
+                self._persist_uncertain_terminal_state()
+                label = getattr(self, 'order_dispatch_status', None)
+                if label is not None:
+                    label.setText('MT5 · chưa rõ kết quả; khóa lệnh mới')
+                self._sync_entry_buttons()
+                return
+            request_id, state = event['request_id'], event['state']
+            error = ''
+        else:
+            request_id, state, error = event.request_id, event.state, event.error
+        short_id = self._task_label(request_id)
+        if request_id in self._dispatch_terminal_ids and state == 'queued':
+            return
+        if state not in ('queued', 'running'):
+            self._dispatch_terminal_ids.add(request_id)
+            with self._scope_lock:
+                self._dispatch_handles.pop(request_id, None)
+            self.log(f'[MT5 task {short_id}] {state}' + (': ' + str(error)[:800] if error else ''))
+            value = getattr(event, 'value', None)
+            if isinstance(value, dict):
+                receipt = value.get('last_native_receipt')
+                if isinstance(receipt, dict):
+                    self.log(f'[MT5 task {short_id}] broker: {receipt.get("state", "unavailable")} · '
+                        f'retcode={receipt.get("retcode")} · order={receipt.get("order")} · deal={receipt.get("deal")}')
+        if len(self._dispatch_terminal_ids) > 2048:
+            self._dispatch_terminal_ids = {request_id}
+        label = getattr(self, 'order_dispatch_status', None)
+        if label is not None:
+            label.setText(f'MT5 #{short_id} · {state}')
+
+    @staticmethod
+    def _task_label(request_id):
+        prefix, separator, counter = str(request_id).rpartition(':')
+        return prefix[:4] + ':' + counter if separator else str(request_id)[-8:]
+
+    def _cancel_entry_tasks(self, reason):
+        if self._order_dispatcher is not None:
+            self._order_dispatcher.cancel_pending(reason, predicate=lambda metadata: bool(metadata.get('entry')))
+
+    def _terminal_key(self, account):
+        key_for = getattr(self.broker, 'key_for', None)
+        return str(key_for(account)) if callable(key_for) else 'demo-serialized'
+
+    def _latch_uncertain_terminal(self, terminal_key, reason):
+        with self._scope_lock:
+            first = terminal_key not in self._uncertain_terminals
+            self._uncertain_terminals[terminal_key] = {'at_ms': _now_ms(), 'reason': str(reason)[:800]}
+        if self._order_dispatcher is not None:
+            self._order_dispatcher.pause_entries(terminal_key)
+            self._order_dispatcher.cancel_pending('Kết quả gửi lệnh trước chưa rõ; không tự gửi lệnh mới.',
+                predicate=lambda metadata: bool(metadata.get('entry')) and metadata.get('terminal_key') == terminal_key)
+        if first:
+            self.log('MT5 CHƯA RÕ KẾT QUẢ: đã khóa lệnh mới trên terminal này. Kiểm tra lệnh trong MT5; '
+                     'chỉ gõ ASYNC RESUME sau khi đối chiếu. Không tự gửi lại lệnh trước.')
+            self.order_dispatch_changed.emit({'kind': 'latch'})
+
+    def _persist_uncertain_terminal_state(self):
+        with self._scope_lock:
+            saved = {key: {'at_ms': int(value.get('at_ms') or 0),
+                          'reason': 'native_outcome_unknown_manual_reconciliation_required'}
+                     for key, value in self._uncertain_terminals.items()}
+        self.cfg['async_uncertain_terminals'] = saved
+        self._scope_legacy.save_cfg(self.cfg)
+
+    def _preserve_outstanding_native_entries(self):
+        # Called on the GUI thread before shutdown; an in-flight send has no final ack yet.
+        with self._scope_lock:
+            for key, count in self._active_native_entries.items():
+                if count:
+                    self._uncertain_terminals[key] = {'at_ms': _now_ms(), 'reason': 'closed_with_send_in_flight'}
+        self._persist_uncertain_terminal_state()
+
+    @staticmethod
+    def _account_revision(account, *, include_risk=True):
+        keys = ('name', 'path', 'login', 'server', 'password', 'symbol')
+        if include_risk:
+            keys += ('enabled', 'auto', 'max_lot', 'max_loss_pct', 'loss_mode', 'copy_on', 'copy_from', 'copy_ratio', 'copy_invert')
+        fields = {key: account.get(key) for key in keys}
+        return hashlib.sha256(json.dumps(fields, sort_keys=True, default=str).encode('utf-8')).hexdigest()
+
+    def _order_configuration_revision(self):
+        fields = {key: self.cfg.get(key) for key in ('risk_mode', 'risk_pct', 'risk_usd', 'lot_mode', 'lot_fixed',
+            'max_lot', 'max_spread', 'magic', 'deviation', 'exec_plan', 'ai_levels', 'panel_target', 'panel_scope', 'pa')}
+        return hashlib.sha256(json.dumps(fields, sort_keys=True, default=str).encode('utf-8')).hexdigest()
+
+    def _order_guard(self, captured, account, *, entry, automatic=False, analysis=None, ai=None):
+        reference = weakref.ref(self)
+        account_name, revision = account.get('name'), self._account_revision(account, include_risk=entry)
+        terminal_key = self._terminal_key(account)
+        captured_broker = self.broker
+        configuration = self._order_configuration_revision()
+        submitted = _now_ms()
+
+        def guard():
+            owner = reference()
+            if owner is None:
+                return False, 'Cửa sổ không còn hoạt động.'
+            current = owner._scope_snapshot()
+            if current.get('closed'):
+                return False, 'Ứng dụng đã đóng.'
+            if _now_ms() - submitted > (30000 if entry else 120000):
+                return False, 'Tác vụ đã hết thời gian chờ; không tự gửi lại.'
+            selected = next((a for a in list(owner.cfg.get('accounts', ())) if a.get('name') == account_name), None)
+            if selected is None or owner._account_revision(selected, include_risk=entry) != revision:
+                return False, 'Tài khoản hoặc cấu hình kết nối đã thay đổi.'
+            if owner.broker is not captured_broker or owner._terminal_key(selected) != terminal_key:
+                return False, 'Terminal thực thi đã thay đổi khi đang chờ.'
+            if not entry:
+                return True, ''
+            with owner._scope_lock:
+                uncertain = terminal_key in owner._uncertain_terminals
+            if owner._order_dispatcher is not None:
+                uncertain = uncertain or owner._order_dispatcher.entries_paused(terminal_key)
+            if uncertain:
+                return False, 'Terminal có kết quả gửi lệnh chưa rõ; cần đối chiếu MT5 trước ASYNC RESUME.'
+            if not current.get('primary_active') or not selected.get('enabled'):
+                return False, 'Chart nghiên cứu hoặc tài khoản đã tắt; không mở lệnh.'
+            if any(captured.get(key) != current.get(key) for key in
+                    ('source', 'market', 'mode', 'primary_name', 'symbol', 'timeframe', 'analysis_generation')):
+                return False, 'Ngữ cảnh lệnh đã thay đổi khi đang chờ.'
+            if owner._order_configuration_revision() != configuration:
+                return False, 'Tham số lệnh/rủi ro đã thay đổi khi đang chờ.'
+            if automatic and (not owner.cfg.get('auto_trade') or not selected.get('auto')):
+                return False, 'Auto đã tắt trước khi gửi lệnh.'
+            if analysis is not None and not owner._analysis_allowed(analysis):
+                return False, 'Phân tích dùng cho lệnh đã hết hiệu lực.'
+            if ai is not None and not owner._ai_allowed(ai, account=selected):
+                return False, 'Ngữ cảnh AI dùng cho lệnh đã hết hiệu lực.'
+            return True, ''
+
+        return guard
+
+    @staticmethod
+    def _guard_result(guard):
+        result = guard()
+        return result if isinstance(result, tuple) else (bool(result), '')
+
+    @contextmanager
+    def _order_guard_context(self, guard):
+        previous = getattr(self._dispatch_local, 'entry_guard', None)
+        self._dispatch_local.entry_guard = guard
+        bridge = getattr(self.broker, 'order_send_guard', None)
+        try:
+            with bridge(guard) if callable(bridge) else nullcontext():
+                yield
+        finally:
+            self._dispatch_local.entry_guard = previous
+
+    def _submit_order_task(self, account, operation, *, guard, metadata):
+        from aimt_orderflow.async_dispatch import DispatchError
+        terminal_key = self._terminal_key(account)
+        metadata = dict(metadata, terminal_key=terminal_key)
+        try:
+            handle = self._order_dispatcher.submit(terminal_key, operation, guard=guard, metadata=metadata)
+        except DispatchError as error:
+            self.log('Hàng đợi MT5 từ chối tác vụ: ' + str(error))
+            return None
+        with self._scope_lock:
+            if not handle.done():
+                self._dispatch_handles[handle.request_id] = handle
+        self.order_dispatch_changed.emit({'request_id': handle.request_id, 'state': 'queued'})
+        return handle
+
+    @contextmanager
+    def _capture_native_receipts(self):
+        previous = getattr(self._dispatch_local, 'receipts', None)
+        captured = []
+        self._dispatch_local.receipts = captured
+        try:
+            yield captured
+        finally:
+            self._dispatch_local.receipts = previous
+
+    @staticmethod
+    def _operation_value(value, receipts):
+        return {'broker_value': value, 'native_receipts': receipts[-32:],
+                'native_receipt_count': len(receipts), 'native_receipts_omitted': max(0, len(receipts) - 32),
+                'last_native_receipt': receipts[-1] if receipts else None}
+
+    def exec_command(self, text):
+        command = str(text).strip().upper()
+        if command in ('ASYNC', 'ASYNC STATUS'):
+            snapshot = self._order_dispatcher.snapshot() if self._order_dispatcher is not None else {}
+            self.say(f"MT5 queue: queued {snapshot.get('queued', 0)}, running {snapshot.get('running', 0)}, "
+                     f"terminal chưa rõ kết quả {len(self._uncertain_terminals)}. ASYNC RESUME chỉ sau khi kiểm tra MT5.")
+            return snapshot
+        if command == 'ASYNC RESUME':
+            with self._scope_lock:
+                count = len(self._uncertain_terminals)
+                self._uncertain_terminals.clear()
+            if self._order_dispatcher is not None:
+                self._order_dispatcher.resume_entries()
+            self._persist_uncertain_terminal_state()
+            self._sync_entry_buttons()
+            self.say(f'Đã mở lại {count} terminal sau đối chiếu thủ công; lệnh cũ không được gửi lại.')
+            return
+        return super().exec_command(text)
 
     def _scope_snapshot(self):
         with self._scope_lock:
@@ -120,6 +357,7 @@ class ExecutionScopeMixin:
             self._market_last_live_ms = 0
             self._resolved_aliases = {}
             self._aimt_latest_execution_request_id = self._aimt_latest_web_request_id = None
+            self._cancel_entry_tasks('Đã đổi tài khoản/symbol/khung thời gian; huỷ lệnh mới còn chờ.')
             workspace = getattr(self, 'market_workspace', None)
             if workspace is not None:
                 workspace._primary_ai = None
@@ -162,6 +400,7 @@ class ExecutionScopeMixin:
             self._analysis_generation += 1
             self.ai = self.last_ai = None
             self._aimt_latest_execution_request_id = self._aimt_latest_web_request_id = None
+            self._cancel_entry_tasks('Đã đổi chart; huỷ lệnh mới còn chờ.')
             if workspace is not None:
                 workspace._primary_ai = None
         self._publish_execution_scope()
@@ -185,6 +424,16 @@ class ExecutionScopeMixin:
     def _entries_allowed(self, *, notify=True):
         state = self._scope_snapshot()
         allowed = state.get('primary_active') and not state.get('closed')
+        primary = next((a for a in list(getattr(self, 'cfg', {}).get('accounts', ()))
+                        if a.get('name') == state.get('primary_name')), None)
+        with self._scope_lock:
+            uncertain = primary is not None and self._terminal_key(primary) in self._uncertain_terminals
+        if primary is not None and self._order_dispatcher is not None:
+            uncertain = uncertain or self._order_dispatcher.entries_paused(self._terminal_key(primary))
+        if uncertain:
+            if notify:
+                self.log('Lệnh mới bị khóa do kết quả gửi trước chưa rõ. Đối chiếu MT5 rồi mới dùng ASYNC RESUME.')
+            return False
         if not allowed and notify:
             self.log('Lệnh mới bị chặn: chọn tab MT5 · thực thi và kiểm tra tài khoản/symbol trên thanh công cụ.')
         return bool(allowed)
@@ -214,6 +463,26 @@ class ExecutionScopeMixin:
             return
         self._broker_scope_installed = True
         owner = weakref.ref(self)
+        original_session = self.broker.session
+
+        @contextmanager
+        def scoped_session(account):
+            window = owner()
+            if window is None:
+                yield False
+                return
+            existing = getattr(window._dispatch_local, 'entry_guard', None)
+            guard = existing or window._order_guard(window._scope_snapshot(), dict(account), entry=True)
+            previous = getattr(window._dispatch_local, 'account', None)
+            window._dispatch_local.account = dict(account)
+            try:
+                with window._order_guard_context(guard):
+                    with original_session(account) as connected:
+                        yield connected
+            finally:
+                window._dispatch_local.account = previous
+
+        self.broker.session = scoped_session
         for name in ('order', 'pending'):
             original = getattr(self.broker, name)
 
@@ -221,7 +490,39 @@ class ExecutionScopeMixin:
                 window = owner()
                 if window is None or not window._entries_allowed():
                     return False, 'Đang ở chart nghiên cứu hoặc ứng dụng đã đóng; không gửi lệnh MT5.'
-                return _original(*args, **kwargs)
+                guard = getattr(window._dispatch_local, 'entry_guard', None)
+                if guard is not None:
+                    valid, reason = window._guard_result(guard)
+                    if not valid:
+                        return False, reason
+                account = getattr(window._dispatch_local, 'account', None)
+                terminal_key = window._terminal_key(account) if account else None
+                if terminal_key is not None:
+                    with window._scope_lock:
+                        window._active_native_entries[terminal_key] = window._active_native_entries.get(terminal_key, 0) + 1
+                try:
+                    value = _original(*args, **kwargs)
+                except Exception as error:
+                    from aimt_orderflow.async_dispatch import IndeterminateExecutionError
+                    if isinstance(error, (IndeterminateExecutionError, TimeoutError, EOFError, OSError)):
+                        if account:
+                            window._latch_uncertain_terminal(window._terminal_key(account), str(error))
+                    raise
+                finally:
+                    if terminal_key is not None:
+                        with window._scope_lock:
+                            window._active_native_entries[terminal_key] -= 1
+                receipt_method = getattr(window.broker, 'trade_receipt', None)
+                if callable(receipt_method):
+                    try:
+                        receipt = receipt_method()
+                    except Exception as error:
+                        receipt = {'state': 'receipt_unavailable', 'error_type': type(error).__name__,
+                                   'broker_call_returned': True}
+                    receipts = getattr(window._dispatch_local, 'receipts', None)
+                    if receipts is not None and isinstance(receipt, dict):
+                        receipts.append(copy.deepcopy(receipt))
+                return value
 
             setattr(self.broker, name, guarded)
         reverse = self.ops.reverse_all
@@ -230,6 +531,9 @@ class ExecutionScopeMixin:
             window = owner()
             if window is None or not window._entries_allowed():
                 return 'Reverse bị chặn trên chart nghiên cứu; vị thế hiện tại được giữ nguyên.'
+            guard = getattr(window._dispatch_local, 'entry_guard', None)
+            if guard is not None and not window._guard_result(guard)[0]:
+                return 'Reverse bị chặn vì ngữ cảnh lệnh đã thay đổi; vị thế được giữ nguyên.'
             return reverse(*args, **kwargs)
 
         self.ops.reverse_all = guarded_reverse
@@ -252,6 +556,7 @@ class ExecutionScopeMixin:
         if self.busy or not self.enabled_accounts():
             return super().start_analysis(manual)
         self._analysis_generation += 1
+        self._cancel_entry_tasks('Phân tích mới đã thay ngữ cảnh; huỷ lệnh mới còn chờ.')
         self.ai = self.last_ai = None
         if workspace is not None:
             workspace._primary_ai = None
@@ -381,16 +686,83 @@ class ExecutionScopeMixin:
             return None
         if plan.get('src') == 'AI' and not self._ai_allowed(self.ai, account=account, notify=True):
             return None
-        with self.broker.session(account) as connected:
-            if not connected or self.broker.resolve(self.acc_symbol(account)) != payload.get('sym'):
-                self.log(f"[{account.get('name')}] Không chuyển mức giá/kế hoạch sang symbol khác phân tích.")
-                return None
-        return super().trade_account(account, side, payload, plan, manual)
+        if self._order_dispatcher is None:
+            with self.broker.session(account) as connected:
+                if not connected or self.broker.resolve(self.acc_symbol(account)) != payload.get('sym'):
+                    self.log(f"[{account.get('name')}] Không chuyển mức giá/kế hoạch sang symbol khác phân tích.")
+                    return None
+            return super().trade_account(account, side, payload, plan, manual)
+        selected, wanted = dict(account), self.acc_symbol(account)
+        captured = self._scope_snapshot()
+        ai = copy.deepcopy(self.ai) if self.ai else None
+        guard = self._order_guard(captured, selected, entry=True, automatic=not manual, analysis=payload, ai=ai)
+
+        def operation():
+            with self._capture_native_receipts() as receipts:
+                with self._order_guard_context(guard):
+                    with self.broker.session(selected) as connected:
+                        if not connected:
+                            raise RuntimeError('Không kết nối được terminal MT5.')
+                        if self.broker.resolve(wanted) != payload.get('sym'):
+                            self.log(f"[{selected.get('name')}] Không chuyển mức giá/kế hoạch sang symbol khác phân tích.")
+                            return self._operation_value(None, receipts)
+                        value = super(ExecutionScopeMixin, self).trade_account(selected, side, payload, plan, manual)
+                        return self._operation_value(value, receipts)
+
+        handle = self._submit_order_task(selected, operation, guard=guard,
+            metadata={'entry': True, 'automatic': not manual, 'action': side, 'account_name': selected.get('name'),
+                      'symbol': payload.get('sym'), 'timeframe': captured.get('timeframe'),
+                      'generation': captured.get('analysis_generation'), 'mode': captured.get('mode')})
+        if handle is None:
+            return None
+        result = handle.result()
+        return result.value.get('broker_value') if result.state == 'completed' and isinstance(result.value, dict) else None
 
     def panel_run(self, fn, order=False):
         if order and not self._entries_allowed():
             return
-        return super().panel_run(fn, order)
+        if self._order_dispatcher is None:
+            return super().panel_run(fn, order)
+        accounts = self.enabled_accounts() if self.cfg.get('panel_target') == 'ALL' else [self.primary()]
+        accounts = [dict(account) for account in accounts if account]
+        if not accounts:
+            self.log('Panel: chưa có tài khoản đang bật.')
+            return []
+        captured, handles = self._scope_snapshot(), []
+        ai = copy.deepcopy(self.ai) if order and self.cfg.get('pa', {}).get('use_ai_levels') and self.ai else None
+        for account in accounts:
+            guard = self._order_guard(captured, account, entry=order, ai=ai)
+            entry_guard = self._order_guard(captured, account, entry=True, ai=ai)
+            wanted = self.acc_symbol(account)
+
+            def operation(selected=account, requested=wanted, send_guard=entry_guard):
+                with self._capture_native_receipts() as receipts:
+                    with self._order_guard_context(send_guard):
+                        with self.broker.session(selected) as connected:
+                            if not connected:
+                                raise RuntimeError('Không kết nối được terminal MT5.')
+                            symbol = self.broker.resolve(requested)
+                            message = fn(self.ops, symbol)
+                            if message:
+                                self.log(f"[Panel/{selected['name']}] " + str(message))
+                            return self._operation_value(message, receipts)
+
+            handle = self._submit_order_task(account, operation, guard=guard,
+                metadata={'entry': bool(order), 'automatic': False, 'action': 'panel-entry' if order else 'panel-manage',
+                          'account_name': account.get('name'), 'symbol': wanted,
+                          'timeframe': captured.get('timeframe'), 'generation': captured.get('analysis_generation'),
+                          'mode': captured.get('mode')})
+            if handle is not None:
+                handles.append(handle)
+        return handles
+
+    def set_auto_trade(self, enabled):
+        result = super().set_auto_trade(enabled)
+        self._publish_execution_scope()
+        if not self.cfg.get('auto_trade') and self._order_dispatcher is not None:
+            self._order_dispatcher.cancel_pending('Auto đã tắt; huỷ lệnh Auto còn chờ.',
+                predicate=lambda metadata: bool(metadata.get('automatic')))
+        return result
 
     def panel_order(self, side, lot_override=None):
         if not self._entries_allowed():

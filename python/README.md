@@ -22,11 +22,19 @@ Ngay cạnh **HK** có ô **Q xác nhận lệnh**, mặc định bật. Bật: 
 
 Nút **Kiểm chứng** chạy walk-forward từ dữ liệu đã tải, chọn tham số trên tập quá khứ rồi kiểm tra đoạn tương lai, có phí và slippage. Ba nhóm thực thi kiểm chứng: trend, breakout và mean reversion. Có thêm EMA/ADX/RSI, Bollinger/z-score, Donchian, regression/variance ratio, ATR/Parkinson, VWAP/profile xấp xỉ, microstructure và derivatives. Đây là công cụ nghiên cứu, không phải hệ thống HFT thực thi hay dự báo lượng tử. Không khẳng định bao phủ mọi phương pháp hoặc tạo lợi nhuận.
 
+## Gửi lệnh MT5 nền và đồng thời
+
+Các thao tác Panel và trade chạy qua hàng đợi có giới hạn, không chặn GUI. Tối đa 4 terminal khác nhau xử lý song song; tác vụ cùng terminal theo FIFO, mở đúng session của tài khoản đã chọn trong worker. Có mã tác vụ, trạng thái queued/running/completed/rejected/cancelled/unknown và xác nhận broker riêng (retcode, order/deal, filled/partially filled/placed khi SDK cung cấp). `completed` chỉ nói tác vụ đã trả về, không khẳng định đã khớp đủ lệnh.
+
+Đây là async ở cấp ứng dụng Python. **MetaTrader5 Python không cung cấp `CTrade.SetAsyncMode`/`OrderSendAsync` của MQL5**; cùng terminal vẫn dùng `order_send` đồng bộ. Để gửi song song qua Python, cấu hình các terminal MT5 riêng cho các tài khoản. Không thêm một EA hoặc giao thức giả vào MT5.
+
+Đổi chart/tài khoản/symbol/khung hoặc điều kiện rủi ro sẽ hủy lệnh mở mới còn chờ; phạm vi được kiểm tra lại ngay trước gửi RPC. Không thể hủy một yêu cầu đã gửi đi. Khi mất phản hồi/timeout, trạng thái là **unknown**: không gửi lại tự động, khóa lệnh mới trên terminal bị ảnh hưởng để tránh trùng lệnh. Kiểm tra Orders/Positions trong MT5, sau đó nhập **`ASYNC RESUME`** trong ô lệnh để mở lại; lệnh cũ không được phát lại. **`ASYNC STATUS`** xem hàng đợi. Đóng/quản lý vị thế vẫn có thể thực hiện theo tài khoản đã chụp khi thao tác.
+
 ## Chạy bản Windows đóng gói
 
-1. Tải `AI-MT-Trading-Python-Windows-x64.zip` từ [GitHub Releases](https://github.com/phungbaunam1-hub/py/releases).
-2. **Extract All / Giải nén tất cả**; mở thư mục `AI_MT_Trading`.
-3. Chạy **`AI_MT_Trading.exe`**. Giữ nguyên thư mục `_internal` đi cùng; bản này không cần cài Python.
+1. Tải **`AI_MT_Trading.exe`** từ [GitHub Releases](https://github.com/phungbaunam1-hub/py/releases), hoặc tải ZIP chứa đúng EXE này.
+2. Nếu tải ZIP, giải nén lấy EXE.
+3. Chạy **`AI_MT_Trading.exe`**. Không cần Python hay thư mục `_internal` đi kèm. EXE tự giải nén Qt/WebEngine/MT5 vào thư mục tạm khi mở; có thể khởi động chậm hơn bản thư mục. Terminal MT5 vẫn cần cài và đăng nhập để giao dịch thật.
 4. Sử dụng các panel như ứng dụng gốc. Nút **Order Flow** cạnh thanh lệnh nhanh mở dock bổ sung; phím tắt **Ctrl+Shift+O**. Dock có thể kéo/nổi/đóng, không thay các tab cũ.
 
 Chọn nguồn trong dock, rồi bấm **Kết nối Order Flow**:
@@ -49,6 +57,17 @@ Bản `.exe` dùng `%LOCALAPPDATA%\AI_MT_Trading\ai_mt_trading_config.json` khi 
 Gói đầy đủ có PyQt6-WebEngine để giữ khả năng mở AI Web trong khung. Các dịch vụ AI có thể từ chối đăng nhập từ trình duyệt nhúng; nút **Mở ngoài trình duyệt** và quy trình clipboard của bản gốc vẫn có sẵn.
 
 ## Chạy từ mã nguồn
+
+Nếu muốn **một tệp `.py` duy nhất**, tải `AI_MT_Trading.py` tại Releases. Tệp nhúng toàn bộ module ứng dụng và mã Python gốc; lúc chạy tự nạp vào thư mục tạm, giữ cấu hình/AI Web trong thư mục dữ liệu người dùng. Windows x64 + Python 3.12:
+
+```powershell
+py -3.12 AI_MT_Trading.py --install-deps
+py -3.12 AI_MT_Trading.py
+# Xuất mã đầy đủ để xem/sửa, không cần dùng khi chỉ chạy:
+py -3.12 AI_MT_Trading.py --extract-source .\AI-MT-source
+```
+
+Các thư viện bên thứ ba vẫn cần cài khi chạy Python; EXE đã chứa các thư viện này. Không đóng gói mật khẩu/API key/cấu hình tài khoản vào tệp chia sẻ.
 
 Windows x64 với Python 3.12: có thể nhấp đúp **Start-Windows.bat**, hoặc chạy:
 

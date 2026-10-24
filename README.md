@@ -4,9 +4,9 @@ Bản chính hiện tại **giữ ứng dụng Python ban đầu**, không thay 
 
 ## Tải và chạy
 
-**[Tải ứng dụng Python cho Windows x64](https://github.com/phungbaunam1-hub/py/releases/latest/download/AI-MT-Trading-Python-Windows-x64.zip)**
+**[Tải một EXE Windows x64](https://github.com/phungbaunam1-hub/py/releases/latest/download/AI_MT_Trading.exe)** · **[Tải một file Python](https://github.com/phungbaunam1-hub/py/releases/latest/download/AI_MT_Trading.py)**
 
-Giải nén → mở thư mục **AI_MT_Trading** → chạy **AI_MT_Trading.exe**. Giữ thư mục `_internal` bên cạnh EXE. Không cần cài Python.
+Chạy **AI_MT_Trading.exe**, không cần Python hoặc thư mục `_internal` đi kèm. EXE tự giải nén thư viện vào thư mục tạm khi mở, nên lần khởi động đầu có thể lâu hơn. Bản `.py` là một tệp có toàn bộ mã ứng dụng; vẫn cần Python và thư viện bên thứ ba. Cấu hình và phiên AI Web được lưu riêng để giữ qua các lần chạy.
 
 Bản Windows được đóng gói trên GitHub Actions và chỉ xuất bản sau khi mở/kiểm chứng chính EXE thành công. Xem [Releases](https://github.com/phungbaunam1-hub/py/releases) hoặc [tiến trình build](https://github.com/phungbaunam1-hub/py/actions/workflows/python-original.yml) nếu gói chưa xuất hiện.
 
