@@ -6,6 +6,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from .engine import FlowEngine, Settings
 from .feeds import BrokerFeed, DemoFeed, FeedSignals
 from .widgets import FlowCanvas, utc
+from aimt_market.flow_adapter import PublicFlowAdapter
 
 
 class OrderFlowDock(QtWidgets.QDockWidget):
@@ -25,6 +26,8 @@ class OrderFlowDock(QtWidgets.QDockWidget):
         self.engine = FlowEngine(settings)
         self.last_snapshot = self.engine.snapshot()
         self.history = deque(maxlen=160)
+        self._public_flow = PublicFlowAdapter(self.engine, self.history)
+        self._market_page = None
         self.worker = self.demo = None
         self.active_symbol = ""
         self._generation = 0
@@ -39,7 +42,8 @@ class OrderFlowDock(QtWidgets.QDockWidget):
         layout = QtWidgets.QVBoxLayout(root)
         row = QtWidgets.QHBoxLayout()
         self.source = QtWidgets.QComboBox()
-        self.source.addItems(["DEMO order flow (dữ liệu giả)", "MT5 đang chọn · trades/DOM", "Rithmic plugin · chưa có SDK"])
+        self.source.addItems(["DEMO order flow (dữ liệu giả)", "MT5 đang chọn · trades/DOM", "Rithmic plugin · chưa có SDK",
+                              "Chart crypto đang xem"])
         self.connect_button = QtWidgets.QPushButton("Kết nối Order Flow")
         self.stop_button = QtWidgets.QPushButton("Ngắt")
         self.stop_button.setEnabled(False)
@@ -102,8 +106,8 @@ class OrderFlowDock(QtWidgets.QDockWidget):
         self.apply_button.clicked.connect(self.apply_settings)
         self.overlay.toggled.connect(lambda _: self.app.chart.update())
         self.source.currentIndexChanged.connect(self._selection_changed)
-        self.app.cb_sym.currentTextChanged.connect(self._selection_changed)
-        self.app.cb_acc.currentTextChanged.connect(self._selection_changed)
+        self.app.cb_sym.currentTextChanged.connect(self._primary_selection_changed)
+        self.app.cb_acc.currentTextChanged.connect(self._primary_selection_changed)
         self._demo_timer = QtCore.QTimer(self)
         self._demo_timer.setInterval(150)
         self._demo_timer.timeout.connect(self._demo_step)
@@ -145,8 +149,7 @@ class OrderFlowDock(QtWidgets.QDockWidget):
         if not self.apply_settings():
             return
         self.stop_feed()
-        self.engine.reset()
-        self.history.clear()
+        self._public_flow.reset()
         self.last_snapshot = self.engine.snapshot()
         self._quote_text, self._last_frame = 'Bid — | Ask —', None
         self.active_symbol = self.app.acc_symbol(self.app.primary()) if self.app.primary() else self.app.cfg['symbol']
@@ -160,6 +163,15 @@ class OrderFlowDock(QtWidgets.QDockWidget):
             self.status.setText("Ứng dụng gốc hiện đang mô phỏng MT5. Hãy cấu hình terminal MT5 thật hoặc chọn DEMO order flow riêng.")
             self.refresh()
             return
+        if mode == 3:
+            page = self._market_page
+            if page is None:
+                workspace = getattr(self.app, 'market_workspace', None)
+                page = getattr(workspace, 'active_page', None)
+            if page is None or getattr(getattr(page, 'instrument', None), 'provider', None) == 'MT5':
+                self.status.setText("Chọn một tab chart crypto public rồi kết nối Order Flow. Không dùng MT5/demo thay thế.")
+                self.refresh()
+                return
         self._running = True
         self.connect_button.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -170,10 +182,64 @@ class OrderFlowDock(QtWidgets.QDockWidget):
             for i in range(300):
                 self._receive(self._generation, self.demo.frame(now_ms - (300 - i) * 1000))
             self._demo_timer.start()
-        else:
+        elif mode == 1:
             self.worker = BrokerFeed(self.app.broker, self.app.primary(), self.active_symbol, self.signals, self._generation)
             self.worker.start()
+        elif mode == 3:
+            self.market_updated(page)
         self.refresh()
+
+    def market_updated(self, page, trades=None):
+        """GUI-thread hook from the active public chart; this dock never opens a feed/order.
+
+        An explicit trade batch comes from the workspace's queued WebSocket mailbox.
+        With no batch, only a new REST retrieval contributes recent trades.
+        """
+        if self._shutting_down:
+            return
+        self._market_page = page
+        if self.source.currentIndex() != 3:
+            return
+        instrument = getattr(page, 'instrument', None)
+        if page is None or getattr(page, 'closed', False) or getattr(instrument, 'provider', None) == 'MT5':
+            self.stop_feed()
+            self._public_flow.reset()
+            self.active_symbol = ''
+            self._quote_text, self._last_frame = 'Bid — | Ask —', None
+            self.refresh()
+            self.status.setText("Đã dừng Order Flow crypto khi rời chart public. Chọn chart crypto rồi kết nối lại.")
+            return
+        bundle = getattr(page, 'bundle', None)
+        if not bundle:
+            self._public_flow.reset()
+            self.active_symbol = getattr(instrument, 'symbol', '')
+            self._quote_text, self._last_frame = 'Bid — | Ask —', None
+            self.refresh()
+            self.status.setText("Chart crypto đang tải dữ liệu; chưa có prints/DOM để hiển thị.")
+            return
+        try:
+            snapshot = bundle['snapshot']
+            identity = (getattr(page, 'id', None), instrument.key, snapshot.timeframe)
+            if not self._running:
+                if identity != self._public_flow.chart_key:
+                    self._public_flow.reset()
+                    self._quote_text, self._last_frame = 'Bid — | Ask —', None
+                    self.refresh()
+                return
+            update = self._public_flow.ingest(snapshot, chart_key=getattr(page, 'id', None), trades=trades)
+            self.active_symbol = snapshot.instrument.symbol
+            if update.added_trades or update.book_updated:
+                self._last_frame = time.monotonic()
+            bid, ask = self._public_flow.quote.get('bid'), self._public_flow.quote.get('ask')
+            self._quote_text = f'Bid {bid:g}' if bid is not None else 'Bid —'
+            self._quote_text += f' | Ask {ask:g}' if ask is not None else ' | Ask —'
+            self.refresh()
+        except (ValueError, KeyError, TypeError, AttributeError) as error:
+            self.stop_feed()
+            self._public_flow.reset()
+            self._quote_text, self._last_frame = 'Bid — | Ask —', None
+            self.refresh()
+            self.status.setText(f"Dữ liệu public order flow không hợp lệ; đã dừng: {error}")
 
     def _demo_step(self):
         if self._running and self.demo:
@@ -217,13 +283,16 @@ class OrderFlowDock(QtWidgets.QDockWidget):
             return
         was_running = self._running
         self.stop_feed()
-        self.engine.reset()
-        self.history.clear()
+        self._public_flow.reset()
         self._last_frame = None
         self._quote_text = "Bid — | Ask —"
         self.refresh()
         if was_running:
             self.status.setText("Đã đổi tài khoản/symbol/nguồn: kết nối lại Order Flow để bắt đầu phiên mới.")
+
+    def _primary_selection_changed(self, *_):
+        if self.source.currentIndex() != 3:
+            self._selection_changed()
 
     def stop_feed(self):
         self._generation += 1
@@ -247,7 +316,12 @@ class OrderFlowDock(QtWidgets.QDockWidget):
         self.app.chart.update()
         self.summary.setText(getattr(self, '_quote_text', 'Bid — | Ask —') +
             f" | Δ {snapshot.delta:+.3f} | {len(snapshot.candles)} nến | {len(snapshot.big_trades)} big prints giữ trong bộ nhớ")
-        if self._running and self._last_frame and time.monotonic() - self._last_frame > 5:
+        if self._running and self.source.currentIndex() == 3:
+            stream_status = getattr(self._market_page, 'stream_status', None)
+            self.status.setText(self._public_flow.status_text(stream_status=stream_status))
+            if self._public_flow.instrument:
+                self.summary.setText(self.summary.text() + f' | đơn vị {self._public_flow.instrument.volume_unit}')
+        elif self._running and self._last_frame and time.monotonic() - self._last_frame > 5:
             self.status.setText("Order flow chưa có frame mới >5 giây; dữ liệu hiển thị đã cũ. Không tự tạo dữ liệu thay thế.")
         book = [x for x in snapshot.book if x.side == 'Bid'][:30] + [x for x in snapshot.book if x.side == 'Ask'][:30]
         rows = [(x.side, f'{x.price:g}', f'{x.size:g}') for x in book]

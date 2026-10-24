@@ -10,6 +10,8 @@ try {
         --distpath python/dist --workpath python/build --specpath python/build python/run_aimt.py
     if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed.' }
     Copy-Item python/README.md python/dist/AI_MT_Trading/README.md -Force
+    New-Item -ItemType Directory -Force python/dist/AI_MT_Trading/docs | Out-Null
+    Copy-Item docs/MARKET_METHODS.md,docs/PUBLIC_DATA.md python/dist/AI_MT_Trading/docs/ -Force
     New-Item -ItemType Directory -Force artifacts | Out-Null
     Compress-Archive -Path python/dist/AI_MT_Trading -DestinationPath artifacts/AI-MT-Trading-Python-Windows-x64.zip -Force
     python scripts/package-python-source.py --output artifacts/AI-MT-Trading-Python-source.zip

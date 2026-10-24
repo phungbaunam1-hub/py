@@ -31,6 +31,8 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest python/tests -q --junitxml=artifacts/python-tests.xml
+      - name: Probe public exchange connectivity (region restrictions reported)
+        run: python scripts/probe-public-markets.py --output artifacts/public-market-probe.json
       - name: Package the original application with its addon
         run: ./python/Build-Windows.ps1
       - name: Launch the real packaged Windows EXE and verify its UI
@@ -55,9 +57,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = 'python-original-' + $env:GITHUB_RUN_NUMBER
-          gh release create $tag --target $env:GITHUB_SHA --title "AI MT Trading gốc + Order Flow ($tag)" --notes-file python/RELEASE.md --latest
+          gh release create $tag --target $env:GITHUB_SHA --title "AI MT Trading · Crypto Workspace ($tag)" --notes-file python/RELEASE.md --latest
           if ($LASTEXITCODE -ne 0) { throw 'Release creation failed.' }
-          gh release upload $tag artifacts/AI-MT-Trading-Python-Windows-x64.zip artifacts/AI-MT-Trading-Python-source.zip artifacts/AI-MT-Trading-Python-source.sha256.txt artifacts/packaged-smoke.json artifacts/packaged-smoke.png --clobber
+          gh release upload $tag artifacts/AI-MT-Trading-Python-Windows-x64.zip artifacts/AI-MT-Trading-Python-source.zip artifacts/AI-MT-Trading-Python-source.sha256.txt artifacts/packaged-smoke.json artifacts/packaged-smoke.png artifacts/public-market-probe.json artifacts/python-tests.xml --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Release upload failed.' }
       - uses: actions/upload-artifact@v4
         if: always()
@@ -66,3 +68,4 @@ jobs:
           path: |
             artifacts/python-tests.xml
             artifacts/packaged-smoke.*
+            artifacts/public-market-probe.json

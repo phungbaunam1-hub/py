@@ -113,6 +113,21 @@ def _release(self):
     self._orderflow_states = {}
 
 
+def _market_catalog(self):
+    from original import AI_MT_Trading as legacy
+    result = []
+    for info in legacy.mt5.symbols_get() or ():
+        result.append({'symbol': info.name, 'base': getattr(info, 'currency_base', '') or 'UNKNOWN',
+                       'quote': getattr(info, 'currency_profit', '') or 'UNKNOWN',
+                       'tick_size': float(getattr(info, 'trade_tick_size', 0) or getattr(info, 'point', .01) or .01),
+                       'path': getattr(info, 'path', ''), 'description': getattr(info, 'description', '')})
+    return result
+
+
+def _all_symbols(self):
+    return [item['symbol'] for item in _market_catalog(self)]
+
+
 def run_worker(conn, cfg):
     from original import AI_MT_Trading as legacy
     install(legacy)
@@ -126,7 +141,9 @@ def install(legacy):
     legacy._mt5_worker = run_worker
     legacy.MT5Local.orderflow_read = _read
     legacy.MT5Local.orderflow_release = _release
-    legacy.RPC_METHODS.update({"orderflow_read", "orderflow_release"})
+    legacy.MT5Local.market_catalog = _market_catalog
+    legacy.MT5Local.symbols = _all_symbols
+    legacy.RPC_METHODS.update({"orderflow_read", "orderflow_release", "market_catalog"})
     shutdown = legacy.MT5Local.shutdown
 
     def close(self):

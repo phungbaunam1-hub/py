@@ -54,13 +54,28 @@ def _run_smoke(app, window):
     window.resize(1500, 950)
     window.start_analysis(True)
     window.orderflow.start_feed()
+    research_page = None
 
     def check():
+        nonlocal research_page
         ready = (window.chart.bars is not None and window.payload is not None and not window.busy
                  and window.orderflow.last_snapshot.big_trades)
         if not ready and time.monotonic() - start < 15:
             QtCore.QTimer.singleShot(50, check)
             return
+        if ready and research_page is None:
+            from aimt_market.data import Instrument
+            research_page = window.market_workspace.add_chart(
+                Instrument('MT5', 'broker', window.payload['sym'], 'UNKNOWN', 'UNKNOWN', 'broker'),
+                window.cfg['tf'], include_futures=False)
+            QtCore.QTimer.singleShot(50, check)
+            return
+        if research_page is not None and research_page.bundle is None and time.monotonic() - start < 25:
+            QtCore.QTimer.singleShot(50, check)
+            return
+        from aimt_market.ai import build_ai_context
+        workspace = window.market_workspace
+        context = build_ai_context(window)
         report = {
             'ok': bool(ready), 'broker_demo': bool(window.broker.demo),
             'original_tabs': [window.tabs.tabText(i) for i in range(window.tabs.count())],
@@ -70,9 +85,17 @@ def _run_smoke(app, window):
             'orderflow_levels': len(window.orderflow.last_snapshot.book),
             'mt5_module_available': bool(legacy.HAS_MT5),
             'webengine_available': bool(legacy.HAS_WEB),
+            'chart_tab_labels': [workspace.tabs.tabText(i) for i in range(workspace.tabs.count())],
+            'research_demo_chart_loaded': bool(research_page and research_page.bundle),
+            'research_chart_blocks_mt5_entries': not window._entries_allowed(notify=False),
+            'hotkey_confirmation_default': window.confirm_hotkeys.isChecked(),
+            'ai_context_has_workspace': bool(context.get('workspace') or context.get('market_workspace')),
+            'public_crypto_providers': ['Binance', 'Bybit', 'OKX', 'Kraken'],
         }
         report['ok'] = (report['ok'] and report['broker_demo'] and report['analysis_results'] == 8
-                        and report['has_panel_chat_web'] and report['orderflow_levels'] > 0)
+                        and report['has_panel_chat_web'] and report['orderflow_levels'] > 0
+                        and report['research_demo_chart_loaded'] and report['research_chart_blocks_mt5_entries']
+                        and report['hotkey_confirmation_default'] and report['ai_context_has_workspace'])
         if sys.platform == 'win32' and getattr(sys, 'frozen', False):
             helper = Path(QtCore.QLibraryInfo.path(QtCore.QLibraryInfo.LibraryPath.LibraryExecutablesPath)) / 'QtWebEngineProcess.exe'
             report['webengine_helper_exists'] = helper.is_file()

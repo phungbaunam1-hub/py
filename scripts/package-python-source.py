@@ -17,6 +17,10 @@ with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
             continue
         if item.is_file() and item.suffix in {'.py', '.txt', '.md', '.bat', '.ps1'}:
             archive.write(item, Path('AI-MT-Trading-Python') / relative)
+    for name in ('MARKET_METHODS.md', 'PUBLIC_DATA.md'):
+        item = root / 'docs' / name
+        if item.is_file():
+            archive.write(item, Path('AI-MT-Trading-Python/docs') / name)
 with zipfile.ZipFile(output) as archive:
     assert archive.testzip() is None
 with output.open('rb') as stream:
